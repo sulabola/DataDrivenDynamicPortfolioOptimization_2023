@@ -1,0 +1,720 @@
+---
+title: "Portfolio Optimization Using a Novel Data-Driven EWMA Covariance Model"
+author: "Sulalitha Bowala"
+date: "2023-06-15"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+Loading Package
+```{r}
+library(zoo)
+library(tseries)
+library(corrplot)
+library(xts)
+library(xtable)
+library(moments)
+```
+
+
+Load Data
+```{r}
+BTCdata <- read.csv('BTC_data_hourly.csv')
+BTC=BTCdata$Adj.Close
+
+ETHdata <- read.csv('ETH_data_hourly.csv')
+ETH=ETHdata$Adj.Close
+
+BNCdata <- read.csv('BNC_data_hourly.csv')
+BNC=BNCdata$Adj.Close
+
+XRPdata <- read.csv('XRP_data_hourly.csv')
+XRP=XRPdata$Adj.Close
+
+DOGEdata <- read.csv('DOGE_data_hourly.csv')
+DOGE=DOGEdata$Adj.Close
+
+ADAdata <- read.csv('ADA_data_hourly.csv')
+ADA=ADAdata$Adj.Close
+
+datecolumn = BTCdata$X
+
+dataSet=cbind.data.frame(datecolumn, BTC, ETH, BNC, XRP, DOGE, ADA)
+dim(dataSet)
+dataSet=dataSet[-c(1:5040),] ## Remove first 7 months data
+dim(dataSet)
+
+head(dataSet)
+```
+
+
+
+```{r}
+## calculating returns - entire dataset
+#n_all = dim(data)[1]
+#R_all <- (data[2:n_all, ] / data[1:(n_all-1), ] - 1)
+dataSet1 = dataSet[-c(3471:11022),]
+
+plot(dataSet1$BTC, type = "l", ylab='Adjusted Closing Price (USD)', main='Bitcoin', cex.main = 1.5, cex.lab = 1, cex.axis = 1, lwd=3.0, col = 1)
+
+plot(dataSet1$ETH, type = "l", ylab='Adjusted Closing Price (USD)', main='Ethereum', cex.main = 1.5, cex.lab = 1, cex.axis = 1, lwd=3.0, col = "2")
+
+plot(dataSet1$BNC, type = "l", ylab='Adjusted Closing Price (USD)', main='Binance Coin', cex.main = 1.5, cex.lab = 1, cex.axis = 1, lwd=3.0, col = 3)
+
+plot(dataSet1$XRP, type = "l", ylab='Adjusted Closing Price (USD)', main='Ripple', cex.main = 1.5, cex.lab = 1, cex.axis = 1, lwd=3.0, col = 4)
+
+plot(dataSet1$DOGE, type = "l", ylab='Adjusted Closing Price (USD)', main='Dogecoin', cex.main = 1.5, cex.lab = 1, cex.axis = 1, lwd=3.0, col = 5)
+
+plot(dataSet1$ADA, type = "l", ylab='Adjusted Closing Price (USD)', main='Cardano', cex.main = 1.5, cex.lab = 1, cex.axis = 1, lwd=3.0, col = 6)
+```
+
+
+```{r}
+### Selecting January data
+dataSet = dataSet[-c(2079:11022),]
+data<-as.matrix(dataSet[,-1])
+colnames(data)<-c("Bitcoin", "Ethereum", "BinanceCoin", "Ripple", "Dogecoin", "Cardano")
+tail(dataSet)
+```
+
+
+
+```{r}
+prices<-tail(data, 721)
+n = dim(prices)[1]
+##### calculating returns for last 2800 values (testing data). i.e. last 20 months data
+R =  (prices[2:n, ] / prices[1:(n-1), ] - 1)
+number=ncol(data)
+```
+
+
+risk-free rate
+```{r}
+#risk-free rate for this study is the average treasury bill rate (T-bill rate) from April 1st, 2020, to February 18, 2022. All the data are obtained from Bloomberg.
+
+Rf <- read.csv("Tbill_Jan.csv")
+mufree <- mean(Rf[,2])/(365*100)
+```
+
+
+summary statistics
+```{r}
+apply(R, 2, mean)
+apply(R, 2, sd)
+apply(R, 2, skewness)
+apply(R, 2, kurtosis)
+```
+
+
+
+calculate the lag 1 ACF of return, absolute value of return and square return
+```{r}
+acf.R<-matrix(0, nrow=number, ncol=3)
+for(j in 1:number){
+  acf.R[j, ]<-c(acf(R[, j], plot=FALSE)$acf[2],
+                acf(abs(R[, j]), plot=FALSE)$acf[2],
+                acf(R[, j]^2, plot=FALSE)$acf[2])
+  ###### acf[2] means lag 1 sample auto-correlation
+}
+rownames(acf.R)<-colnames(R)
+colnames(acf.R)<-c("series", "abs", "sq")
+acf.R
+```
+
+
+```{r}
+rho<-rep(0, number)
+for(j in 1:number){
+  rho[j]<-cor(R[, j]-mean(R[, j]), sign(R[, j]-mean(R[, j])))
+}
+names(rho)<-colnames(data)
+rho
+nu<-rep(0, number)
+for(j in 1:number){
+  fun <- function (x) rho[j]*(x-1)*beta(x/2,1/2)-2*sqrt(x-2)
+  nu[j] <- uniroot(fun, c(2, 8))$root
+}
+nu
+```
+
+
+Empirical:
+```{r}
+mean_vect = apply(R,2,mean)
+mean_vect
+
+cov_mat<-cov(R)
+cov_mat
+
+z<-solve(cov_mat)%*%(mean_vect-mufree)
+z
+
+w.sigma.emp<-z/sum(z)
+w.sigma.emp
+```
+
+
+Data Driven:
+```{r}
+#### choosing optimal alpha for EWMA
+dd.alpha<-function(Z){
+  alpha<-seq(0.01, 0.3, 0.01)
+  t<-length(Z)
+  cut.t<-200
+  MSE_alpha<-rep(0, length(alpha))
+  for(a in 1:length(alpha)){
+    s<-mean(Z[1:cut.t])
+    error<-rep(0, t)
+    for(i in 1:t){
+      error[i]<-Z[i]-s
+      s<-alpha[a]*Z[i]+(1-alpha[a])*s
+    }
+    MSE_alpha[a]<-mean(error[-(1:cut.t)]^2)
+  }
+  alpha.opt<-alpha[which.min(MSE_alpha)]
+  return(alpha.opt)
+}
+```
+
+
+
+```{r}
+#### data driven method to forecast volatility
+dd.vol<-function(y){
+  t<-length(y)
+  
+  rho<-cor(y-mean(y), sign(y-mean(y)))
+  vol<-abs(y-mean(y))/rho
+  #rho_vol <- cor(abs(y-mean(y)),(y-mean(y))^2)
+  #vol <- sqrt(1-rho_vol^2)*sd(y)
+    
+  alpha<-dd.alpha(vol)
+  cut.t<-500
+  s<-mean(vol[1:cut.t])
+  for(i in 1:t){
+    s<-alpha*vol[i]+(1-alpha)*s
+  }
+  return(s)
+}
+```
+
+
+
+```{r}
+#### data driven approach to calculate residuals
+dd.res<-function(y){
+  
+  rho<-cor(y-mean(y), sign(y-mean(y)))
+  vol<-abs(y-mean(y))/rho
+  #rho_vol <- cor(abs(y-mean(y)),(y-mean(y))^2)
+  #vol <- sqrt(1-rho_vol^2)*sd(y)
+  
+  alpha<-dd.alpha(vol)
+  cut.t<-500
+  s<-mean(vol[1:cut.t])
+  t<-length(y)
+  res<-y
+  for(i in 1:t){
+    res[i]<-(y[i]-mean(y))/s
+    s<-alpha*vol[i]+(1-alpha)*s
+  }
+  return(res)
+}
+```
+
+
+```{r}
+dd.cor.mat<-function(R){
+  R.res<-R
+  for(j in 1:ncol(R)){
+    R.res[, j]<-dd.res(R[, j])
+  }
+  cor_mat<-cor(R.res)
+  return(cor_mat)
+}
+```
+
+
+```{r}
+dd<-function(y){
+  alpha<-seq(0.01, 0.3, 0.01)
+  t<-length(y)
+  cut.t<-500 
+  
+  rho<-cor(y-mean(y), sign(y-mean(y)))
+  vol<-abs(y-mean(y))/rho
+  #rho_vol <- cor(abs(y-mean(y)),(y-mean(y))^2)
+  #vol <- sqrt(1-rho_vol^2)*sd(y)
+  
+  MSE_alpha<-rep(0, length(alpha))
+  sn<-rep(0, length(alpha))
+  for(a in 1:length(alpha)){
+    s<-mean(vol[1:cut.t])
+    error<-rep(0, t)
+    for(i in 1:t){
+      error[i]<-vol[i]-s
+      s<-alpha[a]*vol[i]+(1-alpha[a])*s
+    }
+    MSE_alpha[a]<-mean(error[-(1:cut.t)]^2)
+    sn[a]<-s
+  }
+  vol.fore<-sn[which.min(MSE_alpha)]
+  return(vol.fore)
+}
+```
+
+
+```{r}
+mean_vect = apply(R,2,mean)
+mean_vect
+
+cor_mat<-dd.cor.mat(R)
+cor_mat
+
+sd_vect<-apply(R, 2, dd)
+sd_vect
+
+cov_mat<-sd_vect%*%t(sd_vect)*cor_mat
+cov_mat
+
+z<-solve(cov_mat)%*%(mean_vect-mufree)
+z
+
+w.sigma.dd<-z/sum(z)
+w.sigma.dd
+
+cor_mat.dd<-cor_mat
+
+cov_mat.dd<-cov_mat
+
+```
+
+
+```{r}
+portfolio_returns = function(w, asset_returns) {
+  port.returns = 0
+  
+  # Multiplication of the i-th asset by the i-th weight in "x"
+  for (i in 1:length(w)) {
+    port.returns = port.returns + asset_returns[,i] * w[i]
+  }
+  
+  return (port.returns)
+}
+```
+
+
+```{r}
+w.sigma<-data.frame(w.sigma.dd, w.sigma.emp, diag(1, number))
+colnames(w.sigma)<-c("DD", "EMP", colnames(data))
+w.sigma
+sharpe.ratio<-c()
+for(j in 1:ncol(w.sigma)){
+  w<-w.sigma[, j]
+  R.port<-portfolio_returns(w, R)
+  vol<-dd(R.port)
+  sharpe.ratio[j]<-(mean(R.port)-mufree)/vol
+}
+names(sharpe.ratio)<-c("DD", "EMP", colnames(data))
+sharpe.ratio
+```
+
+
+```{r}
+corrplot(cor(R), method="ellipse", main="Empirical")
+corrplot(cor_mat.dd, method="ellipse", main="Data Driven")
+cor(R); cor_mat.dd
+cov(R); cov_mat.dd
+```
+
+
+
+Calculating sign-correlation and degree of freedom
+
+```{r}
+rho.cal<-function(R){
+  rho<-cor(R-mean(R), sign(R-mean(R)))
+  return(rho)
+}
+nu.cal<-function(R){
+  rho<-cor(R-mean(R), sign(R-mean(R)))
+  fun <- function (x) rho*(x-1)*beta(x/2,1/2)-2*sqrt(x-2)
+  nu <- uniroot(fun, c(2, 8))$root
+  return(nu)
+}
+```
+
+
+calculate portfolio returns and sign-rho, and degree of freedom
+
+```{r}
+#### calculate the portfolio returns
+R.port<-R%*%as.matrix(w.sigma)
+rho<-apply(R.port, 2, rho.cal)
+rho
+nu<-apply(R.port, 2, nu.cal)
+nu
+```
+
+
+VaR and ES calculation:
+```{r}
+#### forecasting volatility based on data driven method
+vol.port<-apply(R.port, 2, dd)
+
+#### calculating VaR
+VaR.port<-(-1000)*qt(0.01, df=nu)*sqrt((nu-2)/nu)*vol
+VaR.port
+
+#### calculating ES
+ES.cal<-function(nu, p) sqrt((nu-2)/nu)*dt(qt (p,nu), nu)/p*(nu + (qt (p,nu))^2)/(nu-1)
+ES.port<-VaR.port
+for(j in 1:number){
+  ES.port[j]<-vol.port[j]*1000*ES.cal(nu[j], 0.01)
+}
+ES.port
+```
+
+
+summarize the portfolio and individual stock
+
+```{r}
+portfolio<-data.frame(sharpe.ratio,rho, nu, VaR.port, ES.port )
+colnames(portfolio)<-c("Sharpe Ratio","rho", "df", "VaR", "ES")
+portfolio
+```
+
+
+Sharpe ratio - empirical
+```{r}
+sharpe.emp.cal<-function(R, mufree){
+  #mufree=0
+  mean_vect = apply(R,2,mean)
+  cov_mat<-cov(R)
+  z<-solve(cov_mat)%*%(mean_vect-mufree)
+  w<-z/sum(z)
+  R.port<-portfolio_returns(w, R)
+  vol<-dd(R.port)
+  mad<-vol*cor(R.port-mean(R.port), sign(R.port-mean(R.port)))
+  #sharpe.ma<-(mean(R.port)-mufree)/vol
+  nu<-nu.cal(R.port)
+  return(c(mean(R.port), vol, nu, mad))
+}
+```
+
+
+Sharpe ratio - DD
+```{r}
+sharpe.dd.cal<-function(R, mufree){
+  mean_vect = apply(R,2,mean)
+  cor_mat<-dd.cor.mat(R)
+  sd_vect<-apply(R, 2, dd)
+  cov_mat<-sd_vect%*%t(sd_vect)*cor_mat
+  #if(prod(eigen(cov_mat)$value>=0)==1) print("positive definite")
+  #else print("negative definite")
+  #mufree=0
+  z<-solve(cov_mat)%*%(mean_vect-mufree)
+  w<-z/sum(z)
+  R.port<-portfolio_returns(w, R)
+  vol<-dd(R.port)
+  #sharpe.dd<-(mean(R.port)-mufree)/vol
+  nu<-nu.cal(R.port)
+  mad<-vol*cor(R.port-mean(R.port), sign(R.port-mean(R.port)))
+  return(c(mean(R.port), vol, nu, mad))
+}
+```
+
+
+
+```{r}
+rownames(R) <- dataSet$datecolumn[-c(1:1358)]
+R<-as.xts(R)
+end.names<-rownames(as.matrix(R))
+end.names<-tail(end.names, 24)
+mufree<-Rf[, 2]
+names(mufree)<-Rf$Date
+mufree<-as.xts(mufree)
+risk.free<-R[, 1]
+
+temp = rep(mufree,each=27)
+for (i in 1:length(risk.free)) {
+  risk.free[i] = temp[i]
+}
+
+mufree<-as.vector(risk.free)/(100*365)
+mufree<-tail(mufree, 24)
+colnames(mufree)<-NULL
+prices<-tail(data, 720+length(mufree))
+
+n = dim(prices)[1]
+R =  (prices[2:n, ] / prices[1:(n-1), ] - 1)
+
+summary.emp<-matrix(0, nrow=length(mufree), ncol=4)
+summary.dd<-matrix(0, nrow=length(mufree), ncol=4)
+for(i in 1:length(mufree)){
+  R.use<-as.data.frame(R[i:(720+i-1), ])
+  summary.emp[i, ]<-sharpe.emp.cal(R.use, mufree[i])
+  summary.dd[i, ]<-sharpe.dd.cal(R.use, mufree[i])
+}
+
+#head(summary.emp)
+#head(summary.dd)
+
+```
+
+
+```{r}
+mean.port<-data.frame(summary.emp[,1], summary.dd[, 1])
+vol.port<-data.frame(summary.emp[, 2], summary.dd[, 2])
+nu.port<-data.frame(summary.emp[, 3], summary.dd[, 3])
+sharpe.port<-data.frame((mean.port[, 1]-mufree)/vol.port[, 1], 
+                        (mean.port[, 2]-mufree)/vol.port[, 2])
+mad.port<-data.frame(summary.emp[, 4], summary.dd[, 4])
+colnames(mean.port)<-c("emp", "dd")
+#rownames(mean.port)<-end.names
+colnames(vol.port)<-c("emp", "dd")
+#rownames(vol.port)<-end.names
+colnames(nu.port)<-c("emp", "dd")
+#rownames(nu.port)<-end.names
+colnames(sharpe.port)<-c("emp", "dd")
+#rownames(sharpe.port)<-end.names
+colnames(mad.port)<-c("emp", "dd")
+#rownames(mad.port)<-end.names
+head(mean.port)
+head(vol.port)
+head(nu.port)
+#### sd of mean of portfolio
+mean_sd<-apply(mean.port, 2, sd)
+head(mean_sd)
+```
+
+
+```{r}
+VaR.port.dd<-(-1000)*(mean.port[, 2]+vol.port[, 2]*sqrt((nu.port[, 2]-2)/nu.port[, 2])*
+                        qt(0.01, df=nu.port[, 2]))
+VaR.port.emp<-(-1000)*(mean.port[, 1]+vol.port[, 1]*sqrt((nu.port[, 1]-2)/nu.port[, 1])*
+                        qt(0.01, df=nu.port[, 1]))
+ES.port.dd<-VaR.port.dd
+ES.port.emp<-VaR.port.emp
+for(i in 1:length(VaR.port.dd)){
+  ES.port.dd[i]<-ES.cal(nu.port[i, 2], 0.01)*1000*vol.port[i, 2]
+  ES.port.emp[i]<-ES.cal(nu.port[i, 1], 0.01)*1000*vol.port[i, 1]
+}
+VaR.port<-data.frame(VaR.port.emp, VaR.port.dd)
+ES.port<-data.frame(ES.port.emp, ES.port.dd)
+#rownames(VaR.port)<-end.names
+#rownames(ES.port)<-end.names
+colnames(VaR.port)<-c("emp", "dd")
+colnames(ES.port)<-c("emp", "dd")
+head(VaR.port)
+head(ES.port)
+```
+
+
+
+```{r}
+## summary - Empirical
+vol.summary = c(mean(vol.port$emp), sd(vol.port$emp))
+vol.summary
+
+SR.summary = c(mean(sharpe.port$emp), sd(sharpe.port$emp))
+SR.summary
+
+MAD.summary = c(mean(mad.port$emp), sd(mad.port$emp))
+MAD.summary
+
+VaR.summary = c(mean(VaR.port$emp), sd(VaR.port$emp))
+VaR.summary
+
+ES.summary = c(mean(ES.port$emp), sd(ES.port$emp))
+ES.summary
+```
+
+
+
+```{r}
+## summary - Empirical
+vol.summary = c(mean(vol.port$dd), sd(vol.port$dd))
+vol.summary
+
+SR.summary = c(mean(sharpe.port$dd), sd(sharpe.port$dd))
+SR.summary
+
+MAD.summary = c(mean(mad.port$dd), sd(mad.port$dd))
+MAD.summary
+
+VaR.summary = c(mean(VaR.port$dd), sd(VaR.port$dd))
+VaR.summary
+
+ES.summary = c(mean(ES.port$dd), sd(ES.port$dd))
+ES.summary
+```
+
+
+
+```{r}
+hist(sharpe.port[, 1], main="EMPIRICAL")
+hist(sharpe.port[, 2], main="Data Driven")
+```
+
+
+```{r}
+#main="Sharpe ratio Forecast", ylim=c(min(sharpe.port), max(sharpe.port)),
+plot(sharpe.port[,1], type="S",lwd = 2, col="orange", ylab = "Sharpe ratio", ylim=c(min(sharpe.port), max(sharpe.port)))
+lines(sharpe.port[,2],lwd = 2, col = "purple")
+grid(nx = NULL, ny = NULL,
+     lty = 2,      # Grid line type
+     col = "gray", # Grid line color
+     lwd = 2)
+legend("bottomright", legend = c("EMP", "DD"), lty=c(1, 1), lwd=c(4, 4), col=c("orange", "purple"))
+
+```
+
+
+```{r}
+#main="VaR Forecast",ylim=c(min(VaR.port), max(VaR.port)+2),
+plot(VaR.port[,1], type="S", lwd = 2, col="orange", ylab = "Value-at-Risk", ylim = c(min(VaR.port), max(VaR.port)+2))
+lines(VaR.port[,2], lwd = 2, col="purple")
+grid(nx = NULL, ny = NULL,
+     lty = 2,      # Grid line type
+     col = "gray", # Grid line color
+     lwd = 2)
+legend("topright", legend = c("EMP", "DD"), lty=c(1, 1), lwd=c(4, 4), col=c("orange", "purple"))
+#addLegend("topright", on=1, legend.names = c("EMP", "DD"), lty=c(1, 1), lwd=c(3, 3),col=c("blue", "red"))
+```
+
+
+```{r}
+#main="ES Forecasts",ylim=c(min(ES.port), max(ES.port)),
+plot(ES.port[,1], type="S", lwd = 2, col="orange", ylab = "Expected Shortfall", ylim = c(min(ES.port), max(ES.port)))
+lines(ES.port[,2], lwd = 2, col = "purple")
+grid(nx = NULL, ny = NULL,
+     lty = 2,      # Grid line type
+     col = "gray", # Grid line color
+     lwd = 2)
+legend("topright", legend = c("EMP", "DD"), lty=c(1, 1), lwd=c(4, 4), col=c("orange", "purple"))
+#addLegend("topright", on=1, legend.names = c("EMP", "DD"), lty=c(1, 1), lwd=c(1, 1),col=c("blue", "red"))
+```
+
+
+```{r}
+#main="Volatility Forecasts",ylim=c(min(vol.port), max(vol.port)+0.001),
+plot(vol.port[,1], type="S", lwd = 2, col="orange", ylab = "Volatility", ylim = c(min(vol.port), max(vol.port)))
+lines(vol.port[,2], lwd = 2, col = "purple")
+grid(nx = NULL, ny = NULL,
+     lty = 2,      # Grid line type
+     col = "gray", # Grid line color
+     lwd = 2)
+legend("topright", legend = c("EMP", "DD"), lty=c(1, 1), lwd=c(4, 4), col=c("orange", "purple"))
+#addLegend("topright", on=1, legend.names = c("EMP", "DD"), lty=c(1, 1), lwd=c(3, 3),col=c("blue", "red"))
+```
+
+
+
+```{r}
+#main="MAD Forecasts",ylim=c(min(mad.port), max(mad.port)+0.001),
+plot(mad.port[,1], type="S", lwd = 2, col="orange", ylab = "Mean Absolute Deviation", ylim = c(min(mad.port), max(mad.port)))
+lines(mad.port[,2], lwd = 2, col = "purple")
+grid(nx = NULL, ny = NULL,
+     lty = 2,      # Grid line type
+     col = "gray", # Grid line color
+     lwd = 2)
+legend("topright", legend = c("EMP", "DD"), lty=c(1, 1), lwd=c(4, 4), col=c("orange", "purple"))
+#addLegend("topright", on=1, legend.names = c("EMP", "DD"), lty=c(1, 1), lwd=c(3, 3),col=c("blue", "red"))
+```
+
+
+
+```{r}
+sharpe.ratio.mean<-apply(sharpe.port, 2, mean)
+sharpe.ratio.sd<-apply(sharpe.port, 2, sd)
+VaR.mean<-apply(VaR.port, 2, mean)
+VaR.sd<-apply(VaR.port, 2, sd)
+ES.mean<-apply(ES.port, 2, mean)
+ES.sd<-apply(ES.port, 2, sd)
+mad.sd<-apply(mad.port, 2, sd)
+vol.sd<-apply(vol.port, 2, sd)
+sharpe.ratio.mean; sharpe.ratio.sd
+sharpe.summary<-data.frame(sharpe.ratio.mean, sharpe.ratio.sd)
+sharpe.summary
+                          
+#mad.sd,VaR.sd,ES.sd)
+#xtable(sharpe.summary, digits=4)
+
+risk.summary<-data.frame(vol.sd, mad.sd,VaR.sd,ES.sd)
+risk.summary
+#xtable(risk.summary, digits=4)
+```
+
+
+
+```{r}
+utility<-(sharpe.port[, 2]^2-sharpe.port[, 1]^2)/(sharpe.port[, 1]^2)*100
+mean(utility)
+utility<-as.data.frame(utility)
+#colnames(utility)<-"% change in utility"
+library(ggplot2)
+ggplot(utility, aes(x=utility))+
+  geom_histogram(color="black", fill="mistyrose1", binwidth = 20)+
+  geom_vline(aes(xintercept=mean(utility)),
+             color="navy", linetype="dashed", size=1)+
+  labs(x="Percentage Change in Utility")
+#title="Percentage Change in Utility - Histogram plot",
+```
+
+
+```{r}
+library(ggplot2)
+Approach<-c(rep("EMP", nrow(vol.port)),
+             rep("DD", nrow(vol.port)))
+data.plot<-data.frame(MAD=c(mad.port[, 1], mad.port[, 2]),
+                      Volatility=c(vol.port[, 1], vol.port[, 2]),
+                      VaR=c(VaR.port[, 1], VaR.port[, 2]), 
+                      ES=c(ES.port[, 1], ES.port[, 2]),
+                      Approach)
+par(mfrow=c(4, 1))
+ggplot(data.plot, aes(x=Approach, y=MAD, fill=Approach))+
+  geom_boxplot(outlier.colour="black", outlier.shape=16,
+             outlier.size=2, notch=TRUE)
+ggplot(data.plot, aes(x=Approach, y=Volatility, fill=Approach))+
+  geom_boxplot(outlier.colour="black", outlier.shape=16,
+             outlier.size=2, notch=TRUE)
+ggplot(data.plot, aes(x=Approach, y=VaR, fill=Approach))+
+  geom_boxplot(outlier.colour="black", outlier.shape=16,
+             outlier.size=2, notch=TRUE)
+ggplot(data.plot, aes(x=Approach, y=ES, fill=Approach))+
+  geom_boxplot(outlier.colour="black", outlier.shape=16,
+             outlier.size=2, notch=TRUE)
+#vol.p
+```
+
+
+
+
+```{r}
+## Updated Figures
+
+model.risk.E<-list()
+
+model.risk.E[[1]]<-data.frame(vol.port[, 1], vol.port[, 2])
+model.risk.E[[2]]<-data.frame(mad.port[, 1], mad.port[, 2])
+model.risk.E[[3]]<-data.frame(VaR.port[, 1], VaR.port[, 2])
+model.risk.E[[4]]<-data.frame(ES.port[, 1], ES.port[, 2])
+
+main.names<-c("Volatility", "MAD", "VaR", "ES")
+
+par(mfrow=c(1, 4))
+
+for(j in 1:4){
+
+  colnames(model.risk.E[[j]])<-c("EMP", "DD")
+
+  boxplot(model.risk.E[[j]], col=c("yellow", 4), main=main.names[j])
+
+}
+```
+
